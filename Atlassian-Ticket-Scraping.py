@@ -82,6 +82,35 @@ def parse_relative_date(date_str):
     # If all else fails, return original string
     return date_str
 
+def get_highest_iga_ticket(df):
+    """Find the highest IGA ticket and move it to top."""
+    if df.empty:
+        return df
+    
+    # Filter IGA tickets
+    iga_tickets = df[df['key'].str.startswith('IGA-', na=False)]
+    
+    if iga_tickets.empty:
+        return df
+    
+    # Find the highest IGA ticket (by numeric part)
+    def extract_number(key):
+        try:
+            return int(key.split('-')[1])
+        except:
+            return 0
+    
+    highest_iga_idx = iga_tickets['key'].apply(extract_number).idxmax()
+    highest_iga_row = df.loc[highest_iga_idx]
+    
+    # Remove it from original position
+    df = df.drop(highest_iga_idx)
+    
+    # Add it to top
+    df = pd.concat([pd.DataFrame([highest_iga_row]).reset_index(drop=True), df.reset_index(drop=True)], ignore_index=True)
+    
+    return df
+
 def get_last_scraped_key():
     """Get the key of the last scraped ticket from master file."""
     if not os.path.exists(MASTER_FILE): return None
@@ -208,7 +237,7 @@ def main():
             
             # FINAL SORTING: Ensure most recent are at top
             # If key is like "ABC-123", descending alphabetical/numeric sorting works
-            final_df = final_df.sort_values(by='key', ascending=False)
+            final_df = get_highest_iga_ticket(final_df)
 
             final_df.to_csv(MASTER_FILE, index=False, encoding='utf-8-sig')
             print(f"Save completed. {len(new_tickets)} new tickets added.")
