@@ -1,7 +1,7 @@
 import os
 import time
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -29,6 +29,59 @@ BASE_TARGET_URL = f"https://{ATLASSIAN_SITE}.atlassian.net/servicedesk/customer/
 # =============================================================================
 # FUNCTIONS
 # =============================================================================
+def parse_relative_date(date_str):
+    """Convert Atlassian relative dates to datetime objects."""
+    if not date_str or pd.isna(date_str):
+        return None
+    
+    date_str = str(date_str).strip().lower()
+    today = datetime.now()
+    
+    # Handle relative dates
+    if date_str == 'today':
+        return today
+    elif date_str == 'yesterday':
+        return today - timedelta(days=1)
+    elif date_str.startswith('yesterday at'):
+        return today - timedelta(days=1)
+    elif date_str.startswith('today at'):
+        return today
+    elif 'ago' in date_str:
+        # Handle "X minutes/hours/days ago"
+        parts = date_str.split()
+        if len(parts) >= 3:
+            try:
+                value = int(parts[0])
+                unit = parts[1]
+                if 'minute' in unit:
+                    return today - timedelta(minutes=value)
+                elif 'hour' in unit:
+                    return today - timedelta(hours=value)
+                elif 'day' in unit:
+                    return today - timedelta(days=value)
+                elif 'week' in unit:
+                    return today - timedelta(weeks=value)
+                elif 'month' in unit:
+                    return today - timedelta(days=value*30)  # Approximate
+            except ValueError:
+                pass
+    
+    # Try to parse standard date formats
+    date_formats = [
+        '%d/%m/%Y', '%Y-%m-%d', '%m/%d/%Y',
+        '%d/%m/%Y %H:%M', '%Y-%m-%d %H:%M', '%m/%d/%Y %H:%M',
+        '%d %b %Y', '%d %B %Y', '%b %d, %Y', '%B %d, %Y'
+    ]
+    
+    for fmt in date_formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    
+    # If all else fails, return original string
+    return date_str
+
 def get_last_scraped_key():
     """Get the key of the last scraped ticket from master file."""
     if not os.path.exists(MASTER_FILE): return None
@@ -91,8 +144,8 @@ def scrape_page(driver, page_num):
             'type': cols[0].get_text(strip=True),
             'service_desk': cols[4].get_text(strip=True),
             'requester': cols[5].get_text(strip=True) if len(cols) > 5 else '',
-            'created': cols[6].get_text(strip=True) if len(cols) > 6 else '',
-            'updated': cols[7].get_text(strip=True) if len(cols) > 7 else '',
+            'created': parse_relative_date(cols[6].get_text(strip=True)) if len(cols) > 6 else None,
+            'updated': parse_relative_date(cols[7].get_text(strip=True)) if len(cols) > 7 else None,
             'priority': cols[8].get_text(strip=True) if len(cols) > 8 else '',
             'url': link.get('href', '') if link else ''
         })
@@ -112,6 +165,8 @@ def main():
 
         page = 1
         found_old = False
+        anchor_page = None
+        
         while page <= 50: # Page limit
             print(f"Analyzing page {page}...")
             page_data = scrape_page(driver, page)
@@ -119,13 +174,24 @@ def main():
             if not page_data: break
             
             for t in page_data:
-                if last_key and t['key'] == last_key:
-                    print(f"Found anchor point: {last_key}. Stopping.")
+                if last_key and t['key'] == last_key and anchor_page is None:
+                    print(f"Found anchor point: {last_key} on page {page}.")
+                    anchor_page = page
                     found_old = True
-                    break
-                new_tickets.append(t)
             
-            if found_old: break
+            # Always add tickets from first 2 pages, or until anchor if found after page 2
+            if page <= 2 or (anchor_page is None or anchor_page > 2):
+                new_tickets.extend(page_data)
+            elif found_old and anchor_page <= 2:
+                # If anchor found in first 2 pages, only add tickets before anchor
+                for t in page_data:
+                    if last_key and t['key'] == last_key:
+                        break
+                    new_tickets.append(t)
+                break
+            
+            if found_old and anchor_page is not None and anchor_page > 2:
+                break
             page += 1
 
         if new_tickets:
