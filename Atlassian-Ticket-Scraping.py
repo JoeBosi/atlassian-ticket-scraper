@@ -30,56 +30,58 @@ BASE_TARGET_URL = f"https://{ATLASSIAN_SITE}.atlassian.net/servicedesk/customer/
 # FUNCTIONS
 # =============================================================================
 def parse_relative_date(date_str):
-    """Convert Atlassian relative dates to datetime objects."""
+    """Convert Atlassian relative dates to date string format."""
     if not date_str or pd.isna(date_str):
-        return None
+        return ""
     
     date_str = str(date_str).strip().lower()
     today = datetime.now()
     
-    # Handle relative dates
-    if date_str == 'today':
-        return today
-    elif date_str == 'yesterday':
-        return today - timedelta(days=1)
-    elif date_str.startswith('yesterday at'):
-        return today - timedelta(days=1)
-    elif date_str.startswith('today at'):
-        return today
-    elif 'ago' in date_str:
-        # Handle "X minutes/hours/days ago"
+    # Handle relative dates and convert to actual date
+    if date_str == 'today' or date_str == 'oggi':
+        return today.strftime('%d/%m/%Y')
+    elif date_str == 'yesterday' or date_str == 'ieri':
+        return (today - timedelta(days=1)).strftime('%d/%m/%Y')
+    elif date_str.startswith('yesterday at') or date_str.startswith('ieri'):
+        return (today - timedelta(days=1)).strftime('%d/%m/%Y')
+    elif date_str.startswith('today at') or date_str.startswith('oggi'):
+        return today.strftime('%d/%m/%Y')
+    elif 'ago' in date_str or 'fa' in date_str:
+        # Handle "X minutes/hours/days ago" or "X minuti/ore/giorni fa"
         parts = date_str.split()
-        if len(parts) >= 3:
+        if len(parts) >= 2:
             try:
                 value = int(parts[0])
                 unit = parts[1]
-                if 'minute' in unit:
-                    return today - timedelta(minutes=value)
-                elif 'hour' in unit:
-                    return today - timedelta(hours=value)
-                elif 'day' in unit:
-                    return today - timedelta(days=value)
-                elif 'week' in unit:
-                    return today - timedelta(weeks=value)
-                elif 'month' in unit:
-                    return today - timedelta(days=value*30)  # Approximate
+                if 'minute' in unit or 'minuto' in unit or 'minuti' in unit:
+                    return today.strftime('%d/%m/%Y')
+                elif 'hour' in unit or 'ora' in unit or 'ore' in unit:
+                    return today.strftime('%d/%m/%Y')
+                elif 'day' in unit or 'giorno' in unit or 'giorni' in unit:
+                    return (today - timedelta(days=value)).strftime('%d/%m/%Y')
+                elif 'week' in unit or 'settimana' in unit or 'settimane' in unit:
+                    return (today - timedelta(weeks=value)).strftime('%d/%m/%Y')
+                elif 'month' in unit or 'mese' in unit or 'mesi' in unit:
+                    return (today - timedelta(days=value*30)).strftime('%d/%m/%Y')  # Approximate
             except ValueError:
                 pass
     
-    # Try to parse standard date formats
+    # Try to parse standard date formats and return in DD/MM/YYYY format
     date_formats = [
         '%d/%m/%Y', '%Y-%m-%d', '%m/%d/%Y',
         '%d/%m/%Y %H:%M', '%Y-%m-%d %H:%M', '%m/%d/%Y %H:%M',
-        '%d %b %Y', '%d %B %Y', '%b %d, %Y', '%B %d, %Y'
+        '%d %b %Y', '%d %B %Y', '%b %d, %Y', '%B %d, %Y',
+        '%d/%m/%y', '%d/%b/%Y'  # Add short year format
     ]
     
     for fmt in date_formats:
         try:
-            return datetime.strptime(date_str, fmt)
+            parsed_date = datetime.strptime(date_str, fmt)
+            return parsed_date.strftime('%d/%m/%Y')
         except ValueError:
             continue
     
-    # If all else fails, return original string
+    # If all else fails, return original string (might already be a date)
     return date_str
 
 def get_highest_iga_ticket(df):
@@ -173,8 +175,8 @@ def scrape_page(driver, page_num):
             'type': cols[0].get_text(strip=True),
             'service_desk': cols[4].get_text(strip=True),
             'requester': cols[5].get_text(strip=True) if len(cols) > 5 else '',
-            'created': parse_relative_date(cols[6].get_text(strip=True)) if len(cols) > 6 else None,
-            'updated': parse_relative_date(cols[7].get_text(strip=True)) if len(cols) > 7 else None,
+            'created': parse_relative_date(cols[6].get_text(strip=True)) if len(cols) > 6 else '',
+            'updated': parse_relative_date(cols[7].get_text(strip=True)) if len(cols) > 7 else '',
             'priority': cols[8].get_text(strip=True) if len(cols) > 8 else '',
             'url': link.get('href', '') if link else ''
         })
