@@ -11,6 +11,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -24,7 +25,8 @@ EMAIL = os.getenv('EMAIL')
 PASSWORD = os.getenv('PASSWORD')
 
 MASTER_FILE = os.path.join(GDRIVE_BASE_PATH, "tickets.csv")
-BASE_TARGET_URL = f"https://{ATLASSIAN_SITE}.atlassian.net/servicedesk/customer/user/requests?reporter=all&sortBy=createdDate&sortOrder=DESC"
+LOG_FILE = os.path.join(GDRIVE_BASE_PATH, "scraping_log.txt")
+BASE_TARGET_URL = "https://wearequantico.atlassian.net/servicedesk/customer/user/requests?page=1&reporter=all&sNames=Stimato%20-%20In%20Attesa%20di%20Approvazione&sNames=Preso%20in%20Carico&sNames=Approvato&sNames=In%20Lavorazione&sNames=Cancellato&sNames=Consegnato&sNames=Sospeso&sNames=Da%20pubblicare&sNames=Richiesta%20Inviata&sNames=Concluso&sNames=Da%20Stimare&sNames=Info%20Mancanti&sortBy=createdDate&sortOrder=DESC&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49"
 
 # =============================================================================
 # FUNCTIONS
@@ -113,14 +115,6 @@ def get_highest_iga_ticket(df):
     
     return df
 
-def get_last_scraped_key():
-    """Get the key of the last scraped ticket from master file."""
-    if not os.path.exists(MASTER_FILE): return None
-    try:
-        df = pd.read_csv(MASTER_FILE)
-        return str(df.iloc[0]['key']) if not df.empty else None
-    except: return None
-
 def setup_driver():
     """Setup and configure Chrome WebDriver."""
     opts = Options()
@@ -143,7 +137,8 @@ def fast_login(driver):
 
 def scrape_page(driver, page_num):
     """Scrape a single page of tickets from Atlassian service desk."""
-    driver.get(f"{BASE_TARGET_URL}&page={page_num}")
+    url = BASE_TARGET_URL.replace("page=1", f"page={page_num}")
+    driver.get(url)
     time.sleep(4) # Wait for dynamic table loading
     soup = BeautifulSoup(driver.page_source, 'html.parser')
     
@@ -182,72 +177,130 @@ def scrape_page(driver, page_num):
         })
     return tickets
 
+def write_log(message, success=True):
+    """Write a log entry to the log file."""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    status = "SUCCESS" if success else "ERROR"
+    log_entry = f"[{timestamp}] {status}: {message}\n"
+    
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(log_entry)
+    except Exception as e:
+        print(f"Failed to write to log file: {e}")
+
+def atomic_save_csv(df, filepath):
+    """Save CSV file atomically - write to temp file first, then rename."""
+    temp_file = filepath + '.tmp'
+    backup_file = filepath + '.backup'
+    
+    try:
+        # Create backup of existing file if it exists
+        if os.path.exists(filepath):
+            if os.path.exists(backup_file):
+                os.remove(backup_file)
+            os.rename(filepath, backup_file)
+        
+        # Write to temporary file
+        df.to_csv(temp_file, index=False, encoding='utf-8-sig')
+        
+        # Atomic rename
+        os.rename(temp_file, filepath)
+        
+        # Remove backup if successful
+        if os.path.exists(backup_file):
+            os.remove(backup_file)
+            
+        return True
+        
+    except Exception as e:
+        # Restore from backup if something went wrong
+        if os.path.exists(backup_file):
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            os.rename(backup_file, filepath)
+        
+        # Clean up temp file
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+            
+        raise e
+
 # =============================================================================
 # MERGE AND SAVE LOGIC
 # =============================================================================
 def main():
-    """Main function to orchestrate the ticket scraping process."""
-    last_key = get_last_scraped_key()
-    driver = setup_driver()
-    new_tickets = []
+    """Main function to orchestrate the complete ticket scraping process."""
+    start_time = datetime.now()
+    driver = None
+    all_tickets = []
+    success = False
+    error_message = ""
     
     try:
-        if not fast_login(driver): return
+        write_log("Starting ticket scraping session")
+        driver = setup_driver()
+        
+        if not fast_login(driver):
+            error_message = "Failed to login to Atlassian"
+            write_log(error_message, success=False)
+            return
 
         page = 1
-        found_old = False
-        anchor_page = None
         
         while page <= 50: # Page limit
-            print(f"Analyzing page {page}...")
+            print(f"Scraping page {page}...")
             page_data = scrape_page(driver, page)
             
-            if not page_data: break
-            
-            for t in page_data:
-                if last_key and t['key'] == last_key and anchor_page is None:
-                    print(f"Found anchor point: {last_key} on page {page}.")
-                    anchor_page = page
-                    found_old = True
-            
-            # Always add tickets from first 2 pages, or until anchor if found after page 2
-            if page <= 2 or (anchor_page is None or anchor_page > 2):
-                new_tickets.extend(page_data)
-            elif found_old and anchor_page <= 2:
-                # If anchor found in first 2 pages, only add tickets before anchor
-                for t in page_data:
-                    if last_key and t['key'] == last_key:
-                        break
-                    new_tickets.append(t)
+            if not page_data: 
+                print(f"No tickets found on page {page}. Stopping.")
                 break
-            
-            if found_old and anchor_page is not None and anchor_page > 2:
-                break
+                
+            all_tickets.extend(page_data)
+            print(f"Found {len(page_data)} tickets on page {page}. Total: {len(all_tickets)}")
             page += 1
 
-        if new_tickets:
-            new_df = pd.DataFrame(new_tickets)
-            if os.path.exists(MASTER_FILE):
-                old_df = pd.read_csv(MASTER_FILE)
-                # Put new tickets ABOVE old ones
-                final_df = pd.concat([new_df, old_df], ignore_index=True)
-            else:
-                final_df = new_df
+        if all_tickets:
+            final_df = pd.DataFrame(all_tickets)
             
-            # Remove duplicates for safety (based on KEY)
+            # Remove any duplicates (based on KEY)
             final_df.drop_duplicates(subset=['key'], keep='first', inplace=True)
             
-            # FINAL SORTING: Ensure most recent are at top
-            # If key is like "ABC-123", descending alphabetical/numeric sorting works
+            # Sort to put highest IGA ticket at top
             final_df = get_highest_iga_ticket(final_df)
 
-            final_df.to_csv(MASTER_FILE, index=False, encoding='utf-8-sig')
-            print(f"Save completed. {len(new_tickets)} new tickets added.")
+            # ATOMIC SAVE - only write if everything succeeded
+            atomic_save_csv(final_df, MASTER_FILE)
+            
+            end_time = datetime.now()
+            duration = end_time - start_time
+            
+            success_message = f"Scraping completed successfully. {len(final_df)} tickets saved in {duration.total_seconds():.1f}s"
+            write_log(success_message, success=True)
+            print(success_message)
+            success = True
         else:
-            print("All up to date. No new tickets.")
+            error_message = "No tickets found during scraping"
+            write_log(error_message, success=False)
+            print(error_message)
 
+    except Exception as e:
+        error_message = f"Unexpected error during scraping: {str(e)}"
+        write_log(f"{error_message}\n{traceback.format_exc()}", success=False)
+        print(f"ERROR: {error_message}")
+        
     finally:
-        driver.quit()
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+        
+        # Log final status if not already logged
+        if not success and error_message:
+            end_time = datetime.now()
+            duration = end_time - start_time
+            write_log(f"Session failed after {duration.total_seconds():.1f}s: {error_message}", success=False)
 
 if __name__ == "__main__":
     main()
