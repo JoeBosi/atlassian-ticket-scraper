@@ -86,6 +86,47 @@ def parse_relative_date(date_str):
     # If all else fails, return original string (might already be a date)
     return date_str
 
+def get_historical_filename():
+    """Generate historical filename with timestamp."""
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return os.path.join(GDRIVE_BASE_PATH, f"tickets_{timestamp}.csv")
+
+def get_existing_ticket_count():
+    """Get the number of tickets in the existing master file."""
+    try:
+        if os.path.exists(MASTER_FILE):
+            df = pd.read_csv(MASTER_FILE)
+            return len(df)
+        return 0
+    except Exception:
+        return 0
+
+def save_with_fault_tolerance(df):
+    """Save tickets with fault tolerance logic."""
+    existing_count = get_existing_ticket_count()
+    new_count = len(df)
+    
+    print(f"Existing tickets: {existing_count}, New tickets: {new_count}")
+    
+    # Always save historical copy
+    historical_file = get_historical_filename()
+    df.to_csv(historical_file, index=False, encoding='utf-8-sig')
+    print(f"Historical backup saved to: {historical_file}")
+    
+    # Check if new data has fewer tickets (potential error)
+    if new_count < existing_count:
+        # Save as "bad" file and don't overwrite master
+        bad_file = historical_file.replace('.csv', '_bud.csv')
+        df.to_csv(bad_file, index=False, encoding='utf-8-sig')
+        print(f"WARNING: Fewer tickets found! Bad data saved to: {bad_file}")
+        print(f"Master file NOT updated to prevent data loss.")
+        return False
+    else:
+        # Save as master file
+        atomic_save_csv(df, MASTER_FILE)
+        print(f"Master file updated successfully with {new_count} tickets.")
+        return True
+
 def get_highest_iga_ticket(df):
     """Find the highest IGA ticket and move it to top."""
     if df.empty:
@@ -115,70 +156,7 @@ def get_highest_iga_ticket(df):
     
     return df
 
-def setup_driver():
-    """Setup and configure Chrome WebDriver."""
-    opts = Options()
-    # opts.add_argument("--headless") 
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
-
-def fast_login(driver):
-    """Perform fast login to Atlassian service desk."""
-    try:
-        driver.get(f"https://{ATLASSIAN_SITE}.atlassian.net/servicedesk/customer/portal/49/user/login")
-        wait = WebDriverWait(driver, 15)
-        wait.until(EC.presence_of_element_located((By.ID, "user-email"))).send_keys(EMAIL)
-        driver.find_element(By.XPATH, "//button[@type='submit']").click()
-        time.sleep(2)
-        wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))).send_keys(PASSWORD)
-        driver.find_element(By.XPATH, "//button[@type='submit']").click()
-        time.sleep(5)
-        return True
-    except: return False
-
-def scrape_page(driver, page_num):
-    """Scrape a single page of tickets from Atlassian service desk."""
-    url = BASE_TARGET_URL.replace("page=1", f"page={page_num}")
-    driver.get(url)
-    time.sleep(4) # Wait for dynamic table loading
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-    
-    tickets = []
-    # Find all table rows
-    rows = soup.find_all('tr')
-    
-    for row in rows:
-        # CRITICAL CHECK: If row has 'th' tag, it's a header. Skip it.
-        if row.find('th'):
-            continue
-            
-        cols = row.find_all('td')
-        # If row doesn't have enough columns, it's not a valid ticket
-        if len(cols) < 5:
-            continue
-        
-        link = row.find('a')
-        key = link.get_text(strip=True) if link else cols[0].get_text(strip=True)
-        
-        # Clean the Key (e.g., remove spaces or strange characters)
-        key = key.replace('\n', '').strip()
-        
-        tickets.append({
-            'key': key,
-            'reference': cols[1].get_text(strip=True),
-            'summary': cols[2].get_text(strip=True),
-            'status': cols[3].get_text(strip=True),
-            'type': cols[0].get_text(strip=True),
-            'service_desk': cols[4].get_text(strip=True),
-            'requester': cols[5].get_text(strip=True) if len(cols) > 5 else '',
-            'created': parse_relative_date(cols[6].get_text(strip=True)) if len(cols) > 6 else '',
-            'updated': parse_relative_date(cols[7].get_text(strip=True)) if len(cols) > 7 else '',
-            'priority': cols[8].get_text(strip=True) if len(cols) > 8 else '',
-            'url': link.get('href', '') if link else ''
-        })
-    return tickets
-
 def write_log(message, success=True):
-    """Write a log entry to the log file."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     status = "SUCCESS" if success else "ERROR"
     log_entry = f"[{timestamp}] {status}: {message}\n"
@@ -226,6 +204,91 @@ def atomic_save_csv(df, filepath):
             
         raise e
 
+def setup_driver():
+    """Setup and configure Chrome WebDriver."""
+    opts = Options()
+    # opts.add_argument("--headless") 
+    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+
+def fast_login(driver):
+    """Perform fast login to Atlassian service desk."""
+    try:
+        driver.get(f"https://{ATLASSIAN_SITE}.atlassian.net/servicedesk/customer/portal/49/user/login")
+        wait = WebDriverWait(driver, 15)
+        wait.until(EC.presence_of_element_located((By.ID, "user-email"))).send_keys(EMAIL)
+        driver.find_element(By.XPATH, "//button[@type='submit']").click()
+        time.sleep(2)
+        wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))).send_keys(PASSWORD)
+        driver.find_element(By.XPATH, "//button[@type='submit']").click()
+        time.sleep(5)
+        return True
+    except: return False
+
+def scrape_all_tickets(driver):
+    """Scrape all tickets from Atlassian service desk using infinite scroll."""
+    driver.get(BASE_TARGET_URL)
+    time.sleep(4) # Wait for initial page loading
+    
+    # Scroll down to load all tickets FIRST, then extract data
+    print("Loading all tickets by scrolling...")
+    last_height = driver.execute_script("return document.body.scrollHeight")
+    scroll_attempts = 0
+    max_scroll_attempts = 50  # Prevent infinite loops
+    
+    while scroll_attempts < max_scroll_attempts:
+        # Scroll to bottom
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        
+        # Wait for new content to load
+        time.sleep(2)  # Reduced wait time
+        
+        # Calculate new scroll height and compare with last scroll height
+        new_height = driver.execute_script("return document.body.scrollHeight")
+        if new_height == last_height:
+            break
+        last_height = new_height
+        scroll_attempts += 1
+        print(f"Scroll attempt {scroll_attempts}, height: {new_height}")
+    
+    print("Finished scrolling. Extracting ticket data...")
+    # Extract all tickets AFTER fully loading the page
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
+    
+    tickets = []
+    # Find all table rows
+    rows = soup.find_all('tr')
+    
+    for row in rows:
+        # CRITICAL CHECK: If row has 'th' tag, it's a header. Skip it.
+        if row.find('th'):
+            continue
+            
+        cols = row.find_all('td')
+        # If row doesn't have enough columns, it's not a valid ticket
+        if len(cols) < 5:
+            continue
+        
+        link = row.find('a')
+        key = link.get_text(strip=True) if link else cols[0].get_text(strip=True)
+        
+        # Clean the Key (e.g., remove spaces or strange characters)
+        key = key.replace('\n', '').strip()
+        
+        tickets.append({
+            'key': key,
+            'reference': cols[1].get_text(strip=True),
+            'summary': cols[2].get_text(strip=True),
+            'status': cols[3].get_text(strip=True),
+            'type': cols[0].get_text(strip=True),
+            'service_desk': cols[4].get_text(strip=True),
+            'requester': cols[5].get_text(strip=True) if len(cols) > 5 else '',
+            'created': parse_relative_date(cols[6].get_text(strip=True)) if len(cols) > 6 else '',
+            'updated': parse_relative_date(cols[7].get_text(strip=True)) if len(cols) > 7 else '',
+            'priority': cols[8].get_text(strip=True) if len(cols) > 8 else '',
+            'url': link.get('href', '') if link else ''
+        })
+    return tickets
+
 # =============================================================================
 # MERGE AND SAVE LOGIC
 # =============================================================================
@@ -246,19 +309,10 @@ def main():
             write_log(error_message, success=False)
             return
 
-        page = 1
-        
-        while page <= 50: # Page limit
-            print(f"Scraping page {page}...")
-            page_data = scrape_page(driver, page)
-            
-            if not page_data: 
-                print(f"No tickets found on page {page}. Stopping.")
-                break
-                
-            all_tickets.extend(page_data)
-            print(f"Found {len(page_data)} tickets on page {page}. Total: {len(all_tickets)}")
-            page += 1
+        # Scrape all tickets at once using infinite scroll
+        print("Scraping all tickets (this may take a while)...")
+        all_tickets = scrape_all_tickets(driver)
+        print(f"Found {len(all_tickets)} total tickets")
 
         if all_tickets:
             final_df = pd.DataFrame(all_tickets)
@@ -269,16 +323,21 @@ def main():
             # Sort to put highest IGA ticket at top
             final_df = get_highest_iga_ticket(final_df)
 
-            # ATOMIC SAVE - only write if everything succeeded
-            atomic_save_csv(final_df, MASTER_FILE)
+            # Save with fault tolerance
+            save_success = save_with_fault_tolerance(final_df)
             
-            end_time = datetime.now()
-            duration = end_time - start_time
-            
-            success_message = f"Scraping completed successfully. {len(final_df)} tickets saved in {duration.total_seconds():.1f}s"
-            write_log(success_message, success=True)
-            print(success_message)
-            success = True
+            if save_success:
+                end_time = datetime.now()
+                duration = end_time - start_time
+                
+                success_message = f"Scraping completed successfully. {len(final_df)} tickets saved in {duration.total_seconds():.1f}s"
+                write_log(success_message, success=True)
+                print(success_message)
+                success = True
+            else:
+                error_message = "Fault tolerance prevented master file update due to fewer tickets"
+                write_log(error_message, success=False)
+                print(error_message)
         else:
             error_message = "No tickets found during scraping"
             write_log(error_message, success=False)
