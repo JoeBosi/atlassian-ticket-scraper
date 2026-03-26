@@ -26,7 +26,7 @@ PASSWORD = os.getenv('PASSWORD')
 
 MASTER_FILE = os.path.join(GDRIVE_BASE_PATH, "tickets.csv")
 LOG_FILE = os.path.join(GDRIVE_BASE_PATH, "scraping_log.txt")
-BASE_TARGET_URL = "https://wearequantico.atlassian.net/servicedesk/customer/user/requests?page=1&reporter=all&sNames=Stimato%20-%20In%20Attesa%20di%20Approvazione&sNames=Preso%20in%20Carico&sNames=Approvato&sNames=In%20Lavorazione&sNames=Cancellato&sNames=Consegnato&sNames=Sospeso&sNames=Da%20pubblicare&sNames=Richiesta%20Inviata&sNames=Concluso&sNames=Da%20Stimare&sNames=Info%20Mancanti&sortBy=createdDate&sortOrder=DESC&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49&statusPIds=49"
+BASE_TARGET_URL = "https://wearequantico.atlassian.net/servicedesk/customer/user/requests?filter=IGE%20IGA&page=1&reporter=all&sortBy=updatedDate&sortOrder=DESC"
 
 # =============================================================================
 # FUNCTIONS
